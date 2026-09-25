@@ -100,10 +100,19 @@ df_ext_norm = apply_phonetic_features(df_ext_norm)
 print(f"Normalized External Pool in {time.time()-t0:.2f}s")
 
 # Map of external entity metadata
+import re
 ext_country_map = dict(zip(df_ext_norm['entity_id'], df_ext_norm['country_norm']))
-ext_name_map = dict(zip(df_ext_norm['entity_id'], df_ext_norm['name_norm']))
+ext_name_map = {}
+for _, r in df_ext_norm[['entity_id', 'name_norm', 'business_name']].iterrows():
+    n = str(r['name_norm'] or '').strip()
+    if not n:
+        n = re.sub(r'https?://|www\.|\.(?:com|org|net|in|co|io|biz|info|us|edu|gov)\b|@|[^\w\s]', ' ', str(r['business_name']).lower()).strip()
+    ext_name_map[r['entity_id']] = n
+
 ext_phon_map = dict(zip(df_ext_norm['entity_id'], df_ext_norm['name_phonetic']))
 ext_script_map = dict(zip(df_ext_norm['entity_id'], df_ext_norm['name_script']))
+ext_postal_map = dict(zip(df_ext_norm['entity_id'], df_ext_norm['postal_code']))
+ext_addr_tokens_map = dict(zip(df_ext_norm['entity_id'], df_ext_norm['address_tokens']))
 
 # 4. Build Multi-Strategy Blocking Indexes
 print("\n--- Step 4: Building Blocking Indexes ---")
@@ -127,7 +136,7 @@ print(f"Built Sorted Neighborhood Index in {time.time()-t0:.2f}s")
 # 5. Evaluate Candidate Generation & Recall
 print("\n--- Step 5: Executing Candidate Generation & Recall Evaluation ---")
 
-TOP_K = 250
+TOP_K = 450
 WINDOW_SIZE = 10
 
 total_true_matches = 0
@@ -182,16 +191,26 @@ for idx, s1_row in df_s1_norm.iterrows():
     raw_union = c_token | c_phon | c_addr | c_sn
     filtered_union = filter_by_country(raw_union, s1_country, ext_country_map)
     
-    # Pre-scoring and top-k cap (TOP_K = 250 to ensure high recall across all scripts)
+    # Pre-scoring and top-k cap (TOP_K = 450 to ensure high recall >= 98% across all scripts)
     if len(filtered_union) > TOP_K:
         hits_top_k_count += 1
+        s1_n = str(s1_row['name_norm'] or '').strip()
+        if not s1_n and 'business_name' in s1_row:
+            s1_n = re.sub(r'https?://|www\.|\.(?:com|org|net|in|co|io|biz|info|us|edu|gov)\b|@|[^\w\s]', ' ', str(s1_row['business_name']).lower()).strip()
+
         ranked = pre_score_candidates(
-            s1_row['name_norm'],
-            s1_row['name_phonetic'],
-            s1_name_tokens,
-            filtered_union,
-            ext_name_map,
-            entity_phonetic_map=ext_phon_map
+            s1_name_norm=s1_n,
+            s1_name_phonetic=s1_row['name_phonetic'],
+            s1_name_tokens=s1_name_tokens,
+            candidate_ids=filtered_union,
+            entity_name_map=ext_name_map,
+            entity_phonetic_map=ext_phon_map,
+            s1_postal_code=s1_row['postal_code'],
+            s1_address_tokens=s1_addr_tokens,
+            entity_postal_map=ext_postal_map,
+            entity_address_tokens_map=ext_addr_tokens_map,
+            entity_script_map=ext_script_map,
+            is_non_latin=(s1_row['name_script'] != 'latin')
         )
         final_candidates = {cid for cid, _ in ranked[:TOP_K]}
     else:

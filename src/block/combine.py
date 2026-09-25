@@ -42,39 +42,69 @@ def pre_score_candidates(
     candidate_ids: Set[str],
     entity_name_map: Dict[str, str],
     entity_phonetic_map: Optional[Dict[str, str]] = None,
+    s1_postal_code: Optional[str] = None,
+    s1_address_tokens: Optional[Set[str]] = None,
+    entity_postal_map: Optional[Dict[str, str]] = None,
+    entity_address_tokens_map: Optional[Dict[str, Any]] = None,
+    entity_script_map: Optional[Dict[str, str]] = None,
     is_non_latin: bool = False
 ) -> List[Tuple[str, float]]:
     """
-    Computes an ultra-fast, vectorized pre-score for candidate ranking during top_k truncation.
-    Takes the maximum of Token Jaccard and Phonetic Bigram Jaccard so cross-script matches
-    are never penalized relative to Latin matches.
+    Computes an ultra-fast, symmetric pre-score for candidate ranking during top_k truncation.
+    - Symmetrically maps both S1 and Candidates into the canonical phonetically reduced space.
+    - Uses RapidFuzz token_set_ratio for name matching (robust to order and affix variations).
+    - Takes max(name_sim, addr_sim) with interaction, postal, and cross-script bonuses so address-driven
+      matches (e.g. acronyms/aliases with identical addresses) and cross-script name matches
+      are both preserved near the top of the candidate list.
     """
-    s1_target_phon = s1_name_phonetic if s1_name_phonetic else s1_name_norm
-    s1_bi = {s1_target_phon[i:i+2] for i in range(len(s1_target_phon)-1)} if len(s1_target_phon) >= 2 else {s1_target_phon}
-    
+    from rapidfuzz import fuzz
+    from src.normalize.phonetic import get_phonetic_reduced
+
+    s1_norm = str(s1_name_norm or "").strip()
+    s1_red = get_phonetic_reduced(s1_norm) if s1_norm else ""
+    s1_post = str(s1_postal_code or "").strip()
+    s1_addr_toks = set(s1_address_tokens) if s1_address_tokens else set()
+
     scored = []
     for cid in candidate_ids:
-        c_name = entity_name_map.get(cid, "")
+        c_name = str(entity_name_map.get(cid, "") or "").strip()
         if not c_name:
             scored.append((cid, 0.0))
             continue
-            
-        c_tokens = set(c_name.split())
+
+        c_phon = entity_phonetic_map.get(cid, "") if entity_phonetic_map else ""
+        c_red = get_phonetic_reduced(c_phon if c_phon else c_name)
+
+        # 1. Phonetic reduced similarity
+        name_sim = fuzz.token_set_ratio(s1_red, c_red) / 100.0 if (s1_red and c_red) else 0.0
         
-        # 1. Token Jaccard
-        tok_overlap = len(s1_name_tokens.intersection(c_tokens))
-        tok_union = len(s1_name_tokens.union(c_tokens))
-        tok_jaccard = (tok_overlap / tok_union) if tok_union > 0 else 0.0
-        
-        # 2. Phonetic Bigram Jaccard (using pre-stored phonetic representation)
-        c_phon = entity_phonetic_map.get(cid, c_name) if entity_phonetic_map else c_name
-        c_bi = {c_phon[i:i+2] for i in range(len(c_phon)-1)} if len(c_phon) >= 2 else {c_phon}
-        bi_jaccard = len(s1_bi.intersection(c_bi)) / max(1, len(s1_bi.union(c_bi)))
-        
-        # Combined score is maximum of exact token overlap and phonetic overlap
-        combined_score = max(tok_jaccard, bi_jaccard)
-        scored.append((cid, combined_score))
-        
+        # 2. Raw name similarity
+        raw_sim = fuzz.token_set_ratio(s1_norm, c_name) / 100.0 if (s1_norm and c_name) else 0.0
+        best_name = max(name_sim, raw_sim)
+
+        # 3. Address token similarity
+        if s1_addr_toks and entity_address_tokens_map:
+            c_raw_addr = entity_address_tokens_map.get(cid, [])
+            c_addr_toks = set(c_raw_addr) if isinstance(c_raw_addr, (list, set, tuple)) else set(str(c_raw_addr).split())
+            addr_union = len(s1_addr_toks.union(c_addr_toks))
+            addr_sim = (len(s1_addr_toks.intersection(c_addr_toks)) / addr_union) if addr_union > 0 else 0.0
+        else:
+            addr_sim = 0.0
+
+        # 4. Postal exact match
+        if s1_post and entity_postal_map:
+            c_post = str(entity_postal_map.get(cid, "") or "").strip()
+            post_match = 1.0 if (s1_post and c_post and s1_post == c_post) else 0.0
+        else:
+            post_match = 0.0
+
+        # 5. Cross-script bonus for non-Latin candidate to balance against high-frequency Latin matches
+        script_boost = 0.08 if (entity_script_map and entity_script_map.get(cid, 'latin') != 'latin') else 0.0
+
+        # Combined pre-score
+        final_score = max(best_name, addr_sim) + 0.15 * min(best_name, addr_sim) + 0.10 * post_match + script_boost
+        scored.append((cid, final_score))
+
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored
 
@@ -91,7 +121,10 @@ def generate_candidates(
     entity_country_map: Optional[Dict[str, str]] = None,
     entity_name_map: Optional[Dict[str, str]] = None,
     entity_phonetic_map: Optional[Dict[str, str]] = None,
-    top_k: int = 150,
+    entity_postal_map: Optional[Dict[str, str]] = None,
+    entity_address_tokens_map: Optional[Dict[str, Any]] = None,
+    entity_script_map: Optional[Dict[str, str]] = None,
+    top_k: int = 400,
     window_size: int = 10,
     widen_for_tamil: bool = True
 ) -> Set[str]:
@@ -103,6 +136,11 @@ def generate_candidates(
     """
     # Extract S1 attributes
     name_norm = str(s1_row.get('name_norm', '') if hasattr(s1_row, 'get') else s1_row['name_norm'])
+    if not name_norm and 'business_name' in s1_row:
+        import re
+        raw_bname = str(s1_row.get('business_name', '') if hasattr(s1_row, 'get') else s1_row['business_name']).lower()
+        name_norm = re.sub(r'https?://|www\.|\.(?:com|org|net|in|co|io|biz|info|us|edu|gov)\b|@|[^\w\s]', ' ', raw_bname).strip()
+
     country_norm = str(s1_row.get('country_norm', '') if hasattr(s1_row, 'get') else s1_row['country_norm'])
     script = str(s1_row.get('name_script', 'latin') if hasattr(s1_row, 'get') else s1_row['name_script'])
     name_phonetic = str(s1_row.get('name_phonetic', name_norm) if hasattr(s1_row, 'get') else (s1_row['name_phonetic'] if 'name_phonetic' in s1_row else name_norm))
@@ -173,12 +211,17 @@ def generate_candidates(
     if len(candidates) > top_k and entity_name_map:
         is_non_latin = (script != "latin")
         ranked = pre_score_candidates(
-            name_norm,
-            name_phonetic,
-            name_tokens,
-            candidates,
-            entity_name_map,
+            s1_name_norm=name_norm,
+            s1_name_phonetic=name_phonetic,
+            s1_name_tokens=name_tokens,
+            candidate_ids=candidates,
+            entity_name_map=entity_name_map,
             entity_phonetic_map=entity_phonetic_map,
+            s1_postal_code=postal_code,
+            s1_address_tokens=addr_tokens,
+            entity_postal_map=entity_postal_map,
+            entity_address_tokens_map=entity_address_tokens_map,
+            entity_script_map=entity_script_map,
             is_non_latin=is_non_latin
         )
         candidates = {cid for cid, _ in ranked[:top_k]}
@@ -198,7 +241,9 @@ def generate_all_candidates_df(
     entity_country_map: Optional[Dict[str, str]] = None,
     entity_name_map: Optional[Dict[str, str]] = None,
     entity_phonetic_map: Optional[Dict[str, str]] = None,
-    top_k: int = 50,
+    entity_postal_map: Optional[Dict[str, str]] = None,
+    entity_address_tokens_map: Optional[Dict[str, Any]] = None,
+    top_k: int = 250,
     window_size: int = 10,
     widen_for_tamil: bool = True
 ) -> pd.DataFrame:
@@ -221,6 +266,8 @@ def generate_all_candidates_df(
             entity_country_map=entity_country_map,
             entity_name_map=entity_name_map,
             entity_phonetic_map=entity_phonetic_map,
+            entity_postal_map=entity_postal_map,
+            entity_address_tokens_map=entity_address_tokens_map,
             top_k=top_k,
             window_size=window_size,
             widen_for_tamil=widen_for_tamil

@@ -38,7 +38,8 @@ The objective is to accurately map every Source 1 business entity to its corresp
             │  • Name token & word-set blocking      │
             │  • Phonetic code inverted index        │
             │  • Geographic & Postal block key       │
-            │  • Empirical Recall: 99.35%            │
+            │  • Post-Capped Model Recall: 98.28%    │
+            │  • (Pre-Cap Theoretical Union: 99.35%) │
             └───────────────────┬────────────────────┘
                                 │
                                 ▼
@@ -75,8 +76,9 @@ The objective is to accurately map every Source 1 business entity to its corresp
    - Employs an additive phonetic reduction layer that increased ground-truth cross-script string similarity from **0.59 to 0.75**.
 
 2. **High-Recall Multi-Strategy Blocking:**
-   - Combines token-level indexing, phonetic hash bucketing, and regional postal-grouping.
-   - Verified **99.35% empirical recall** against validation ground truth.
+   - Combines token-level indexing, phonetic hash bucketing, regional postal-grouping, and address-aware pre-scoring.
+   - **Post-Capped Blocking Recall (Model Candidates):** **98.28%** ($33,992 / 34,588$ confirmed validation matches preserved after top-K capping).
+   - **Pre-Capping Theoretical Union Recall:** **99.35%** ($34,364 / 34,588$ raw candidates retrieved prior to capping).
 
 3. **Ultra-Fast Sparse TF-IDF Pairwise Engine:**
    - Vectorized sparse matrix cosine calculations executing at **>23 Million pairs/sec**.

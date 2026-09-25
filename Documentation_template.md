@@ -6,7 +6,7 @@
 ---
 
 ## 1. Executive Summary
-We designed a high-throughput, cross-lingual Business Entity Resolution system capable of matching reference entities (Source 1) against noisy, multi-source records (Source 2 & Source 3) across 12.5M+ rows. Our solution integrates: (1) an additive phonetic reduction and Indic transliteration layer, (2) a high-recall multi-strategy inverted-index blocking engine achieving **99.35% empirical recall**, and (3) a LightGBM pairwise binary matcher trained on 25 pairwise & group-context features calibrated directly for the **Macro $F_{0.5}$** objective.
+We designed a high-throughput, cross-lingual Business Entity Resolution system capable of matching reference entities (Source 1) against noisy, multi-source records (Source 2 & Source 3) across 12.5M+ rows. Our solution integrates: (1) an additive phonetic reduction and Indic transliteration layer, (2) a high-recall multi-strategy inverted-index blocking engine achieving **98.28% post-capped model candidate recall** (with a **99.35% pre-capping theoretical union ceiling**), and (3) a LightGBM pairwise binary matcher trained on 25 pairwise & group-context features calibrated directly for the **Macro $F_{0.5}$** objective.
 
 ---
 
@@ -35,8 +35,10 @@ To reduce the $12.5\text{M} \times 12.5\text{M}$ comparison space without droppi
   2. *Phonetic Soundex & 3-Gram Hash Index:* Inverted buckets for phonetically reduced name representations.
   3. *Postal Code & Geographic Blocks:* Exact 6-digit PIN / 5-digit ZIP prefixes combined with normalized open-set country partitions.
   4. *Sorted Neighborhood Partitions:* Alphabetical sliding windows (window size $W=10$).
-- **Candidate Reduction:** Caps candidate pairs per S1 entity to top-50 using an ultra-fast Jaccard/Phonetic pre-scoring filter.
-- **Empirical Validation:** Measured on 34,588 ground-truth validation pairs: **99.35% Recall** ($34,364 / 34,588$ matches captured).
+- **Candidate Reduction & Pre-Scoring:** Symmetrically pre-scores candidates via RapidFuzz token set ratio in reduced phonetic space, address token overlap, postal match, and cross-script prioritization, truncating to top-K ($K=450$).
+- **Empirical Validation (Held-out Validation Split):**
+  - **Post-Capped Blocking Recall (Handed to Model):** **98.28%** ($33,992 / 34,588$ confirmed ground-truth matches retrieved).
+  - **Pre-Capping Theoretical Union Recall:** **99.35%** ($34,364 / 34,588$ matches caught in raw candidate union before truncation).
 
 ---
 
